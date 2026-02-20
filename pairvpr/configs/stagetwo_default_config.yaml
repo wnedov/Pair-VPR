@@ -12,15 +12,15 @@ masking:
   mask_ratio: 0.9
   patch_size: 14 # based on encoder
 optim:
-  epochs: 10
+  epochs: 150
   weight_decay: 0.05
   base_lr: 0.00008
-  schedulemaxiters: 6225
+  schedulemaxiters: 1350 #6225
   locallossweight: 2.0
 train:
-  batch_size_per_gpu: 20 # total batch size of 100
+  batch_size_per_gpu: 25 # total batch size of 100
   num_workers: 12
-  num_gpus: 5
+  num_gpus: 4
   classtoken: true
   random: false
 augmentation:
@@ -33,3 +33,9 @@ dataset_locations: # modify for your local machine
   gldv2: "google-landmark/train"
   msls: "Mapillary_Street_Level_Sequences"
   pitts: "Pittsburgh250k"
+  wildcross: "WildCross-Replication/data"
+wildcross:
+  img_per_place: 4
+  min_img_per_place: 4
+  place_cell_size_m: 10.0
+  random_sample_from_each_place: true

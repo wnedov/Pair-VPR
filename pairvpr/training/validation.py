@@ -4,7 +4,10 @@ from prettytable import PrettyTable
 import numpy as np
 import torch
 from tqdm import tqdm
-import wandb
+try:
+    import wandb
+except ImportError:
+    wandb = None
 
 
 def get_validation_recalls(r_list, q_list, k_values, gt, print_results=True, faiss_gpu=False,
@@ -90,6 +93,8 @@ def validation(args, val_dataloaders, model, val_set_names, val_datasets, device
         del r_list, q_list, feats, num_references, positives
 
         if args.usewandb:
+            if wandb is None:
+                raise ImportError("wandb is not installed, but --usewandb was provided.")
             wandb.log({f'{val_set_name}/R1': pitts_dict[1]})
             wandb.log({f'{val_set_name}/R5': pitts_dict[5]})
             wandb.log({f'{val_set_name}/R10': pitts_dict[10]})

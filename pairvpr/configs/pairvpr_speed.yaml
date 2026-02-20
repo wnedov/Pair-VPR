@@ -19,7 +19,7 @@ globaldesc:
   dim: 512
 eval:
   refinetopcands: 100
-  memoryeffmode: false
+  memoryeffmode: true
 dataset_locations:
   sfxl: "sf_dataset/raw/train/panoramas"
   gsv: "gsv_cities"

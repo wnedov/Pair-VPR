@@ -1,0 +1,9 @@
+*.csv
+logs 
+*.pth 
+*.pyc 
+*.json
+wandb 
+__pycache__/
+*.zip
+datasetfiles/

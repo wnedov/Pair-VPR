@@ -16,9 +16,9 @@ import copy
 import argparse
 import torch
 from torch.optim import lr_scheduler
-import wandb
 from omegaconf import OmegaConf
 from tqdm import tqdm
+import wandb
 
 from pairvpr.configs import stagetwo_default_config
 from pairvpr.models.pairvpr import PairVPRNet
@@ -29,6 +29,7 @@ from pairvpr.training.validation import validation
 
 from pairvpr.datasets.gsvcities_dataset import load_train_dataset as gsv_loaddataset
 from pairvpr.datasets.gsvcities_dataset import load_val_dataset
+from pairvpr.datasets.wildcross_stagetwo_dataset import load_train_dataset as wildcross_loaddataset
 
 
 def get_args_parser(add_help: bool = True):
@@ -44,6 +45,12 @@ def get_args_parser(add_help: bool = True):
                         help='Use wandb logging')
     parser.add_argument("--output-dir", "--output_dir", default="", type=str, required=True,
                         help="Output directory to save logs and checkpoints")
+    parser.add_argument("--train_dataset", choices=["gsv", "wildcross"], default="gsv",
+                        help="Dataset used for stage two training")
+    parser.add_argument("--wildcross_routes", nargs="+", default=None,
+                        help="Optional WildCross route names, e.g. K-01 K-02 V-01")
+    parser.add_argument("--skip_validation", action='store_true',
+                        help="Skip validation loop (useful if MSLS is unavailable)")
     parser.add_argument("opts", default=None, nargs=argparse.REMAINDER,
                         help='Can use to modify a config parameter via an argument parse')
 
@@ -77,8 +84,15 @@ def main(args):
     model = PairVPRNet(cfg).to(torch.device("cuda"))
     
     if args.pretrained_ckpt is not None:
-        interpolate_pos_embed(cfg, model, pretrained_ckpt['model']) # interpolate the decoder pos embed for different res
-        model.load_state_dict(pretrained_ckpt['model'], strict=False)
+        if 'model' in pretrained_ckpt:
+            weights = pretrained_ckpt['model']
+        elif 'state_dict' in pretrained_ckpt:
+            weights = pretrained_ckpt['state_dict']
+        else:
+            weights = pretrained_ckpt 
+
+        interpolate_pos_embed(cfg, model, weights) 
+        model.load_state_dict(weights, strict=False)
 
     model.to(torch.device("cuda"))
 
@@ -105,6 +119,8 @@ def main(args):
     paircriterion = torch.nn.BCEWithLogitsLoss()
 
     if args.usewandb:
+        if wandb is None:
+            raise ImportError("wandb is not installed, but --usewandb was provided.")
         myrun = wandb.init(
             project="pairvpr_stagetwo",
             config={
@@ -116,39 +132,49 @@ def main(args):
             },
         )
 
-    GSVdataset = gsv_loaddataset(cfg, args.dsetroot)
+    if args.train_dataset == "wildcross":
+        train_dataset = wildcross_loaddataset(cfg, args.dsetroot, routes=args.wildcross_routes)
+    else:
+        train_dataset = gsv_loaddataset(cfg, args.dsetroot)
 
     batch_size = cfg.train.batch_size_per_gpu * cfg.train.num_gpus
 
-    GSVdataloader = torch.utils.data.DataLoader(
-        GSVdataset,
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
         batch_size=batch_size,
         num_workers=cfg.train.num_workers,
-        shuffle=False, # SALAD and GSV-Cities has this set to false. False means a batch always contains images from the same city.
+        shuffle=True, # SALAD and GSV-Cities has this set to false. False means a batch always contains images from the same city.
         pin_memory=True,
         drop_last=False,
     )
 
-    val_set_names = ['msls_val']
-    valdatasets = load_val_dataset(cfg, dsetroot=args.dsetroot, src_root_dir=root_dir, val_set_names=val_set_names)
-
-    valid_loader_config = {
-        'batch_size': 40,
-        'num_workers': 5,
-        'drop_last': False,
-        'pin_memory': True,
-        'shuffle': False}
+    val_set_names = []
+    valdatasets = []
     val_dataloaders = []
-    for val_dataset in valdatasets:
-        val_dataloaders.append(torch.utils.data.DataLoader(
-            dataset=val_dataset, **valid_loader_config))
+    if not args.skip_validation:
+        msls_path = os.path.join(args.dsetroot, cfg.dataset_locations.msls)
+        if os.path.exists(msls_path):
+            val_set_names = ['msls_val']
+            valdatasets = load_val_dataset(cfg, dsetroot=args.dsetroot, src_root_dir=root_dir, val_set_names=val_set_names)
+
+            valid_loader_config = {
+                'batch_size': 40,
+                'num_workers': 5,
+                'drop_last': False,
+                'pin_memory': True,
+                'shuffle': False}
+            for val_dataset in valdatasets:
+                val_dataloaders.append(torch.utils.data.DataLoader(
+                    dataset=val_dataset, **valid_loader_config))
+        else:
+            print(f"MSLS val path not found at {msls_path}, skipping validation.")
 
     device = torch.device("cuda")
 
     for epoch in range(cfg.optim.epochs):
         multinet.train(True)
         batch_acc_all = []
-        for iteration, batch in tqdm(enumerate(GSVdataloader)):
+        for iteration, batch in tqdm(enumerate(train_dataloader)):
             places, labels = batch
 
             # Note that GSVCities yields places (each containing N images)
@@ -195,14 +221,15 @@ def main(args):
 
             print(loss.item())
 
-            if args.usewandb and (iteration % 20 == 0) and (iteration > 0):
+            if args.usewandb and (iteration % 2 == 0) and (iteration > 0):
                 wandb.log({"loss": loss.item(), "b_acc": sum(batch_acc_all) / len(batch_acc_all),
                            "loss_global": loss1.item(), "loss_fine": loss2.item()})
 
-        net = copy.deepcopy(multinet.module)
-        net = net.eval()
-        net = net.to(torch.device("cuda:1"))  # cuda:1 is important, because in DP training, GPU 0 has a slightly higher GPU memory usage.
-        val_results = validation(args, val_dataloaders, net, val_set_names, valdatasets, device=torch.device("cuda:1"))
+        if len(val_dataloaders) > 0:
+            net = copy.deepcopy(multinet.module)
+            net = net.eval()
+            net = net.to(torch.device("cuda:1"))  # cuda:1 is important, because in DP training, GPU 0 has a slightly higher GPU memory usage.
+            val_results = validation(args, val_dataloaders, net, val_set_names, valdatasets, device=torch.device("cuda:1"))
 
         if not os.path.exists(args.output_dir):
             os.makedirs(args.output_dir)
